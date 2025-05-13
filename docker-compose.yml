@@ -1,0 +1,47 @@
+services:
+  detector:
+    build: ./object_detection
+    volumes:
+      - ./object_detection:/app
+    depends_on:
+      - influxdb
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=my-token
+      - INFLUXDB_ORG=my-org
+      - INFLUXDB_BUCKET=object_detection
+      - DETECTION_INTERVAL=2
+      - FRAME_WIDTH=640
+      - FRAME_HEIGHT=384
+      - YOUTUBE_STREAMS=[{"url":"https://www.youtube.com/watch?v=6MMXJrzT5c0","title":"Henry Africa's Bar & Café | Soi Green Mango","slug":"henry-green-mango"},{"url":"https://www.youtube.com/watch?v=w47yvCftkWQ","title":"Bondi Aussie Bar & Grill | Lamai","slug":"bondi-lamai"},{"url":"https://www.youtube.com/watch?v=U1LMXaV3sYI","title":"Tropical Murphy's Irish Pub | Chaweng","slug":"tropical-chaweng"},{"url":"https://www.youtube.com/watch?v=OFVpXuZOlPc","title":"The Shack | Fisherman's Village","slug":"shack-fisherman"}]
+    restart: unless-stopped
+
+  influxdb:
+    image: influxdb:2
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=myuser
+      - DOCKER_INFLUXDB_INIT_PASSWORD=mypassword
+      - DOCKER_INFLUXDB_INIT_ORG=my-org
+      - DOCKER_INFLUXDB_INIT_BUCKET=object_detection
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-token
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    depends_on:
+      - influxdb
+
+volumes:
+  influxdb-data:
+  grafana-data:
