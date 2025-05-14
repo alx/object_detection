@@ -97,6 +97,20 @@ def process_stream(stream, write_api):
     last_detection = time.time()
     frame_count = 0
     while True:
+
+        # Check if processes are still running, if not, re-init
+        if ytdlp_proc.poll() is not None or ffmpeg_proc.poll() is not None:
+            logger.warning(f"Process ended unexpectedly for '{title}' ({slug}), restarting pipeline...")
+            try:
+                ytdlp_proc.terminate()
+            except Exception:
+                pass
+            try:
+                ffmpeg_proc.terminate()
+            except Exception:
+                pass
+            ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
+
         frame = read_frame(ffmpeg_proc, FRAME_WIDTH, FRAME_HEIGHT)
         if frame is None:
             logger.warning(f"Stream ended or cannot fetch frame for '{title}' ({slug}).")
