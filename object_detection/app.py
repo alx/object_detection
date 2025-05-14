@@ -9,7 +9,7 @@ import json
 import threading
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
-from ultralytics import YOLO
+from darknetpy.detector import Detector
 import random
 
 # Logging setup
@@ -31,8 +31,13 @@ FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", 1280))
 FRAME_HEIGHT = int(os.environ.get("FRAME_HEIGHT", 720))
 YOUTUBE_STREAMS = os.environ.get("YOUTUBE_STREAMS", "[]") # JSON array
 
+# Paths to YOLO model files (adjust as needed)
+DARKNET_DATA = os.environ.get("DARKNET_DATA", "/models/coco.data")
+DARKNET_CFG = os.environ.get("DARKNET_CFG", "/models/yolov4.cfg")
+DARKNET_WEIGHTS = os.environ.get("DARKNET_WEIGHTS", "/models/yolov4.weights")
+detector = Detector(DARKNET_DATA, DARKNET_CFG, DARKNET_WEIGHTS)
+
 def open_ytdlp_ffmpeg_pipe(youtube_url, width, height):
-    # Start yt-dlp process to output 360p video+audio to stdout
     ytdlp_cmd = [
         "yt-dlp",
         "-f", "bestvideo[height<=360]+bestaudio/best[height<=360]",
@@ -42,12 +47,11 @@ def open_ytdlp_ffmpeg_pipe(youtube_url, width, height):
     ytdlp_proc = subprocess.Popen(
         ytdlp_cmd, stdout=subprocess.PIPE, bufsize=10**8
     )
-    # Start FFmpeg process, reading from yt-dlp's stdout
     ffmpeg_cmd = [
         "ffmpeg",
         "-loglevel", "error",
         "-i", "-", # Read from stdin
-        "-vf", f"scale={width}:{height}",  # Force scaling to desired size
+        "-vf", f"scale={width}:{height}", # Force scaling to desired size
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
         "-"
@@ -64,7 +68,6 @@ def read_frame(ffmpeg_proc, width, height, save_dir=None, frame_idx=None):
         return None
     frame = np.frombuffer(raw_frame, np.uint8).reshape((height, width, 3))
     if save_dir is not None and frame_idx is not None:
-        import os
         os.makedirs(save_dir, exist_ok=True)
         filename = os.path.join(save_dir, f"frame_{frame_idx:06d}.png")
         cv2.imwrite(filename, frame)
@@ -92,22 +95,19 @@ def connect_influxdb():
 def random_color():
     return tuple([random.randint(0, 255) for _ in range(3)])
 
-def draw_bounding_boxes(image, boxes, names):
+def draw_bounding_boxes(image, results):
     """
     Draw colored bounding boxes and labels on the image.
-    boxes: list of (box, cls, conf)
+    results: list of dicts from darknetpy
     """
-    for box, cls, conf in boxes:
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-        label = f"{names[int(box.cls[0])]} {conf:.2f}"
+    for obj in results:
+        left, top, right, bottom = obj['left'], obj['top'], obj['right'], obj['bottom']
+        label = f"{obj['class']} {obj['prob']:.2f}"
         color = random_color()
-        # Draw rectangle
-        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
-        # Draw label background
+        cv2.rectangle(image, (left, top), (right, bottom), color, 2)
         (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-        cv2.rectangle(image, (x1, y1 - th - baseline), (x1 + tw, y1), color, -1)
-        # Draw label text
-        cv2.putText(image, label, (x1, y1 - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+        cv2.rectangle(image, (left, top - th - baseline), (left + tw, top), color, -1)
+        cv2.putText(image, label, (left, top - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
     return image
 
 def process_stream(stream, write_api):
@@ -115,13 +115,12 @@ def process_stream(stream, write_api):
     title = stream['title']
     slug = stream['slug']
     logger.info(f"Opening yt-dlp+FFmpeg pipeline for '{title}' ({slug})...")
+
     ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
-    model = YOLO("yolov8n.pt")
     last_detection = time.time()
     frame_count = 0
 
     while True:
-        # Check if processes are still running, if not, re-init
         if ytdlp_proc.poll() is not None or ffmpeg_proc.poll() is not None:
             logger.warning(f"Process ended unexpectedly for '{title}' ({slug}), restarting pipeline...")
             try:
@@ -141,47 +140,43 @@ def process_stream(stream, write_api):
 
         now = time.time()
         if now - last_detection >= DETECTION_INTERVAL:
-            results = model(frame)
+            results = detector.detect(frame)
             logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))}:")
-            detected_boxes = []
-            for result in results:
-                for box in result.boxes:
-                    cls = result.names[int(box.cls[0])]
-                    conf = float(box.conf[0])
-                    x1, y1, x2, y2 = map(float, box.xyxy[0])
-                    logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{int(x1)}, {int(y1)}, {int(x2)}, {int(y2)}]")
-                    detected_boxes.append((box, result.names, conf))
-                    if write_api:
-                        pt = (
-                            Point("object_detections")
-                            .tag("object", cls)
-                            .tag("stream_slug", slug)
-                            .tag("stream_title", title)
-                            .tag("stream_url", url)
-                            .field("confidence", conf)
-                            .field("x1", x1)
-                            .field("y1", y1)
-                            .field("x2", x2)
-                            .field("y2", y2)
-                            .time(int(now * 1e9), WritePrecision.NS)
-                        )
-                        try:
-                            write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=pt)
-                        except Exception as e:
-                            logger.warning(f" [{slug}] Could not write to InfluxDB: {e}")
-                    else:
-                        logger.warning(f" [{slug}] InfluxDB write_api not available, skipping DB write.")
+            for obj in results:
+                cls = obj['class']
+                conf = float(obj['prob'])
+                x1, y1, x2, y2 = obj['left'], obj['top'], obj['right'], obj['bottom']
+                logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{x1}, {y1}, {x2}, {y2}]")
+                if write_api:
+                    pt = (
+                        Point("object_detections")
+                        .tag("object", cls)
+                        .tag("stream_slug", slug)
+                        .tag("stream_title", title)
+                        .tag("stream_url", url)
+                        .field("confidence", conf)
+                        .field("x1", x1)
+                        .field("y1", y1)
+                        .field("x2", x2)
+                        .field("y2", y2)
+                        .time(int(now * 1e9), WritePrecision.NS)
+                    )
+                    try:
+                        write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=pt)
+                    except Exception as e:
+                        logger.warning(f" [{slug}] Could not write to InfluxDB: {e}")
+                else:
+                    logger.warning(f" [{slug}] InfluxDB write_api not available, skipping DB write.")
 
             # Draw colored bounding boxes and save the image if debug mode
-            if detected_boxes and DEBUG_IMG_BBOX:
-                # Use result.names for class names
-                annotated_frame = draw_bounding_boxes(frame.copy(), [(box, box.cls, conf) for box, _, conf in detected_boxes], result.names)
+            if results and DEBUG_IMG_BBOX:
+                annotated_frame = draw_bounding_boxes(frame.copy(), results)
                 os.makedirs("output_images", exist_ok=True)
-                out_path = os.path.join("output_images", f"{slug}_frame_{frame_count:06d}.jpg")
+                epoch_ts = int(now)
+                out_path = os.path.join("output_images", f"{slug}_frame_{frame_count:06d}_{epoch_ts}.jpg")
                 cv2.imwrite(out_path, annotated_frame)
 
             last_detection = now
-
         frame_count += 1
 
     ffmpeg_proc.terminate()

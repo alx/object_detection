@@ -3,6 +3,7 @@ services:
     build: ./object_detection
     volumes:
       - ./object_detection:/app
+      - ./models:/models
     depends_on:
       - influxdb
     environment:
