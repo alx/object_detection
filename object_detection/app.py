@@ -21,6 +21,7 @@ handler.setFormatter(formatter)
 if not logger.hasHandlers():
     logger.addHandler(handler)
 
+DEBUG_IMG_BBOX = (os.getenv('DEBUG_IMG_BBOX', 'False') == 'True')
 INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://influxdb:8086")
 INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "my-token")
 INFLUXDB_ORG = os.environ.get("INFLUXDB_ORG", "my-org")
@@ -171,8 +172,8 @@ def process_stream(stream, write_api):
                     else:
                         logger.warning(f" [{slug}] InfluxDB write_api not available, skipping DB write.")
 
-            # Draw colored bounding boxes and save the image
-            if detected_boxes:
+            # Draw colored bounding boxes and save the image if debug mode
+            if detected_boxes and DEBUG_IMG_BBOX:
                 # Use result.names for class names
                 annotated_frame = draw_bounding_boxes(frame.copy(), [(box, box.cls, conf) for box, _, conf in detected_boxes], result.names)
                 os.makedirs("output_images", exist_ok=True)
