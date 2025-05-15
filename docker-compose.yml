@@ -15,6 +15,7 @@ services:
       - FRAME_WIDTH=640
       - FRAME_HEIGHT=384
       - YOUTUBE_STREAMS=[{"url":"https://www.youtube.com/watch?v=6MMXJrzT5c0","title":"Henry Africa's Bar & Café | Soi Green Mango","slug":"henry-green-mango"},{"url":"https://www.youtube.com/watch?v=w47yvCftkWQ","title":"Bondi Aussie Bar & Grill | Lamai","slug":"bondi-lamai"},{"url":"https://www.youtube.com/watch?v=U1LMXaV3sYI","title":"Tropical Murphy's Irish Pub | Chaweng","slug":"tropical-chaweng"},{"url":"https://www.youtube.com/watch?v=OFVpXuZOlPc","title":"The Shack | Fisherman's Village","slug":"shack-fisherman"}]
+      - CLASS_WHITELIST="car,bicycle,truck,motorcycle"
     restart: unless-stopped
 
   influxdb:

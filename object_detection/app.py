@@ -30,6 +30,8 @@ DETECTION_INTERVAL = int(os.environ.get("DETECTION_INTERVAL", 2))
 FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", 1280))
 FRAME_HEIGHT = int(os.environ.get("FRAME_HEIGHT", 720))
 YOUTUBE_STREAMS = os.environ.get("YOUTUBE_STREAMS", "[]") # JSON array
+YOUTUBE_STREAMS = os.environ.get("YOUTUBE_STREAMS", "[]")
+CLASS_WHITELIST = set(map(str.strip, os.environ.get("CLASS_WHITELIST", "").split(","))) if os.environ.get("CLASS_WHITELIST") else None
 
 # Paths to YOLO model files (adjust as needed)
 DARKNET_DATA = os.environ.get("DARKNET_DATA", "/models/coco.data")
@@ -140,7 +142,12 @@ def process_stream(stream, write_api):
 
         now = time.time()
         if now - last_detection >= DETECTION_INTERVAL:
+
             results = detector.detect(frame)
+
+            # Filter based on classnames
+            if CLASS_WHITELIST is not None:
+                results = [obj for obj in results if obj['class'] in CLASS_WHITELIST]
             logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))}:")
             for obj in results:
                 cls = obj['class']
