@@ -11,6 +11,7 @@ from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 from darknetpy.detector import Detector
 import random
+from collections import deque
 
 # Logging setup
 logger = logging.getLogger("object_detection")
@@ -172,8 +173,10 @@ def process_stream(stream, write_api):
 
     ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
     last_detection = time.time()
-    prev_detections = []
     frame_count = 0
+
+    WINDOW_SIZE = 10
+    prev_detections_window = deque(maxlen=WINDOW_SIZE)
 
     while True:
         if ytdlp_proc.poll() is not None or ffmpeg_proc.poll() is not None:
@@ -203,7 +206,8 @@ def process_stream(stream, write_api):
                 results = [obj for obj in results if obj['class'] in CLASS_WHITELIST]
 
             # Filter out duplicates by position/class
-            filtered_results = filter_duplicate_detections(results, prev_detections, iou_threshold=0.5)
+            all_prev_detections = [det for frame_dets in prev_detections_window for det in frame_dets]
+            filtered_results = filter_duplicate_detections(results, all_prev_detections, iou_threshold=0.5)
 
             logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))}:")
             for obj in filtered_results:
@@ -246,12 +250,8 @@ def process_stream(stream, write_api):
                 cv2.imwrite(out_path, annotated_frame)
 
             last_detection = now
-            prev_detections = results
             frame_count += 1
-
-            # reset previous detections every 10 frames
-            if frame_count % 10 == 0:
-                prev_detections = []
+            prev_detections_window.append(results)
 
     ffmpeg_proc.terminate()
     ytdlp_proc.terminate()
