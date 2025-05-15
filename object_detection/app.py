@@ -238,7 +238,7 @@ def process_stream(stream, write_api):
                     logger.warning(f" [{slug}] InfluxDB write_api not available, skipping DB write.")
 
             # Draw colored bounding boxes and save the image if debug mode
-            if results and DEBUG_IMG_BBOX:
+            if filtered_results and DEBUG_IMG_BBOX:
                 annotated_frame = draw_bounding_boxes(frame.copy(), results)
                 os.makedirs("output_images", exist_ok=True)
                 epoch_ts = int(now)
