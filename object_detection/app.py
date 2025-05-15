@@ -112,6 +112,21 @@ def draw_bounding_boxes(image, results):
         cv2.putText(image, label, (left, top - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
     return image
 
+def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream__url):
+    """
+    Crop the detected region from the frame and save it to
+    output/stream_slug/class_name/DDMMYYYY/epoch_timestamp.jpg
+    """
+    cropped = frame[y1:y2, x1:x2]
+    if cropped.size == 0:
+        return
+    date_str = time.strftime("%d%m%Y")
+    out_dir = os.path.join("output", stream_slug, class_name, date_str)
+    os.makedirs(out_dir, exist_ok=True)
+    epoch_ts = int(time.time())
+    out_path = os.path.join(out_dir, f"{epoch_ts}.jpg")
+    cv2.imwrite(out_path, cropped)
+
 def process_stream(stream, write_api):
     url = stream['url']
     title = stream['title']
@@ -154,6 +169,11 @@ def process_stream(stream, write_api):
                 conf = float(obj['prob'])
                 x1, y1, x2, y2 = obj['left'], obj['top'], obj['right'], obj['bottom']
                 logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{x1}, {y1}, {x2}, {y2}]")
+
+                # Save cropped detection
+                if SAVE_CROPPED_IMG:
+                    save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
+
                 if write_api:
                     pt = (
                         Point("object_detections")
