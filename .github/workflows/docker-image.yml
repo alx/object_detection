@@ -15,4 +15,4 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build the Docker image
-      run: docker build ./object_detection/ --file Dockerfile --tag yt-dlp-ffmpeg-yolo-influxdb:$(date +%s)
+      run: docker build . --file object_detection/Dockerfile --tag object_detection:$(date +%s)
