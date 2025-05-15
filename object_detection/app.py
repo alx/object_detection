@@ -29,9 +29,9 @@ INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET", "object_detection")
 DETECTION_INTERVAL = int(os.environ.get("DETECTION_INTERVAL", 2))
 FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", 1280))
 FRAME_HEIGHT = int(os.environ.get("FRAME_HEIGHT", 720))
-YOUTUBE_STREAMS = os.environ.get("YOUTUBE_STREAMS", "[]") # JSON array
 YOUTUBE_STREAMS = os.environ.get("YOUTUBE_STREAMS", "[]")
 CLASS_WHITELIST = set(map(str.strip, os.environ.get("CLASS_WHITELIST", "").split(","))) if os.environ.get("CLASS_WHITELIST") else None
+SAVE_CROPPED_IMG = (os.getenv('SAVE_CROP_IMG', 'False') == 'True')
 
 # Paths to YOLO model files (adjust as needed)
 DARKNET_DATA = os.environ.get("DARKNET_DATA", "/models/coco.data")
