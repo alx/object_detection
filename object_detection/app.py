@@ -112,6 +112,43 @@ def draw_bounding_boxes(image, results):
         cv2.putText(image, label, (left, top - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
     return image
 
+def iou(boxA, boxB):
+    """
+    Intersection over Union
+    spatial proximity check based on bounding box overlap
+
+    box = (x1, y1, x2, y2)
+    """
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+    iou_val = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+    return iou_val
+
+def filter_duplicate_detections(detections, prev_detections, iou_threshold=0.5):
+    """
+    detections: list of dicts, each with keys 'class', 'left', 'top', 'right', 'bottom'
+    prev_detections: list of dicts from previous detection cycle
+    Returns: filtered list of detections
+    """
+    filtered = []
+    for det in detections:
+        boxA = (det['left'], det['top'], det['right'], det['bottom'])
+        duplicate = False
+        for prev in prev_detections:
+            if det['class'] == prev['class']:
+                boxB = (prev['left'], prev['top'], prev['right'], prev['bottom'])
+                if iou(boxA, boxB) > iou_threshold:
+                    duplicate = True
+                    break
+        if not duplicate:
+            filtered.append(det)
+    return filtered
+
 def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream__url):
     """
     Crop the detected region from the frame and save it to
@@ -135,6 +172,7 @@ def process_stream(stream, write_api):
 
     ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
     last_detection = time.time()
+    prev_detections = []
     frame_count = 0
 
     while True:
@@ -163,8 +201,12 @@ def process_stream(stream, write_api):
             # Filter based on classnames
             if CLASS_WHITELIST is not None:
                 results = [obj for obj in results if obj['class'] in CLASS_WHITELIST]
+
+            # Filter out duplicates by position/class
+            filtered_results = filter_duplicate_detections(results, prev_detections, iou_threshold=0.5)
+
             logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))}:")
-            for obj in results:
+            for obj in filtered_results:
                 cls = obj['class']
                 conf = float(obj['prob'])
                 x1, y1, x2, y2 = obj['left'], obj['top'], obj['right'], obj['bottom']
@@ -204,7 +246,12 @@ def process_stream(stream, write_api):
                 cv2.imwrite(out_path, annotated_frame)
 
             last_detection = now
-        frame_count += 1
+            prev_detections = results
+            frame_count += 1
+
+            # reset previous detections every 10 frames
+            if frame_count % 10 == 0:
+                prev_detections = []
 
     ffmpeg_proc.terminate()
     ytdlp_proc.terminate()
