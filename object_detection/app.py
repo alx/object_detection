@@ -170,6 +170,25 @@ def filter_duplicate_detections(detections_dicts, prev_detections_dicts, iou_thr
             filtered.append(det)
     return filtered
 
+def save_fullframe_detection(frame, class_name, stream_slug):
+    """
+    Crop the detected region from the frame and save it.
+    """
+    # Sanitize stream_slug and class_name for directory creation if necessary
+    safe_stream_slug = "".join(c if c.isalnum() else "_" for c in stream_slug)
+    safe_class_name = "".join(c if c.isalnum() else "_" for c in class_name)
+
+    out_dir = os.path.join("output", "fullframe", safe_stream_slug, safe_class_name)
+    os.makedirs(out_dir, exist_ok=True)
+    epoch_ts = int(time.time() * 1000) # Milliseconds for more uniqueness
+    out_path = os.path.join(out_dir, f"{epoch_ts}.jpg")
+    try:
+        cv2.imwrite(out_path)
+        logger.info(f"Saved fullframe image: {out_path}")
+    except Exception as e:
+        logger.error(f"Error saving cropped image {out_path}: {e}")
+
+
 def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug):
     """
     Crop the detected region from the frame and save it.
@@ -185,7 +204,7 @@ def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug):
     safe_stream_slug = "".join(c if c.isalnum() else "_" for c in stream_slug)
     safe_class_name = "".join(c if c.isalnum() else "_" for c in class_name)
 
-    out_dir = os.path.join("output", safe_stream_slug, safe_class_name)
+    out_dir = os.path.join("output", "cropped", safe_stream_slug, safe_class_name)
     os.makedirs(out_dir, exist_ok=True)
     epoch_ts = int(time.time() * 1000) # Milliseconds for more uniqueness
     out_path = os.path.join(out_dir, f"{epoch_ts}.jpg")
@@ -289,6 +308,7 @@ def process_stream(stream_info, influx_write_api):
                 x1, y1, x2, y2 = det_dict['left'], det_dict['top'], det_dict['right'], det_dict['bottom']
                 logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{x1}, {y1}, {x2}, {y2}]")
 
+                save_fullframe_detection(frame, cls, slug)
                 save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
 
                 if influx_write_api:
