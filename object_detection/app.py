@@ -56,7 +56,7 @@ def open_ytdlp_ffmpeg_pipe(youtube_url, width, height):
     )
     ffmpeg_cmd = [
         "ffmpeg",
-        "-loglevel", "error",
+        "-loglevel", "quiet",
         "-i", "-", # Read from stdin
         "-vf", f"scale={width}:{height}", # Force scaling to desired size
         "-f", "rawvideo",
