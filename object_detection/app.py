@@ -170,7 +170,7 @@ def filter_duplicate_detections(detections_dicts, prev_detections_dicts, iou_thr
             filtered.append(det)
     return filtered
 
-def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug): # Corrected stream__url to stream_slug
+def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug):
     """
     Crop the detected region from the frame and save it.
     """
@@ -181,7 +181,6 @@ def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug): # Co
     if cropped.size == 0:
         logger.warning(f"Skipping save_cropped_detection due to empty crop for {class_name}")
         return
-    date_str = time.strftime("%d%m%Y")
     # Sanitize stream_slug and class_name for directory creation if necessary
     safe_stream_slug = "".join(c if c.isalnum() else "_" for c in stream_slug)
     safe_class_name = "".join(c if c.isalnum() else "_" for c in class_name)
@@ -289,8 +288,7 @@ def process_stream(stream_info, influx_write_api):
                 x1, y1, x2, y2 = det_dict['left'], det_dict['top'], det_dict['right'], det_dict['bottom']
                 logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{x1}, {y1}, {x2}, {y2}]")
 
-                if SAVE_CROPPED_IMG:
-                    save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
+                save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
 
                 if influx_write_api:
                     pt = (
