@@ -299,10 +299,10 @@ def process_stream(stream_info, influx_write_api):
                         .tag("stream_title", title)
                         .tag("stream_url", url)
                         .field("confidence", conf)
-                        .field("x1", float(x1)) # InfluxDB fields
-                        .field("y1", float(y1))
-                        .field("x2", float(x2))
-                        .field("y2", float(y2))
+                        .field("x1", int(x1)) # InfluxDB fields
+                        .field("y1", int(y1))
+                        .field("x2", int(x2))
+                        .field("y2", int(y2))
                         .time(int(current_time * 1e9), WritePrecision.NS) # Nanosecond precision timestamp
                     )
                     try:
