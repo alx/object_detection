@@ -191,7 +191,7 @@ def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug):
     out_path = os.path.join(out_dir, f"{epoch_ts}.jpg")
     try:
         cv2.imwrite(out_path, cropped)
-        logger.debug(f"Saved cropped image: {out_path}")
+        logger.info(f"Saved cropped image: {out_path}")
     except Exception as e:
         logger.error(f"Error saving cropped image {out_path}: {e}")
 
@@ -280,7 +280,8 @@ def process_stream(stream_info, influx_write_api):
             all_prev_detections_dicts = [det for frame_dets_list in prev_detections_window_dicts for det in frame_dets_list]
             final_results_dicts = filter_duplicate_detections(current_detections_dicts, all_prev_detections_dicts, iou_threshold=0.4) # Adjusted threshold if needed
 
-            logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(current_time))}: {len(final_results_dicts)} objects after filtering.")
+            if len(final_results_dicts) > 0:
+                logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(current_time))}: {len(final_results_dicts)} objects after filtering.")
 
             for det_dict in final_results_dicts:
                 cls = det_dict['class']
