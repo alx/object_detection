@@ -47,7 +47,8 @@ except Exception as e:
 def open_ytdlp_ffmpeg_pipe(youtube_url, width, height):
     ytdlp_cmd = [
         "yt-dlp",
-        "-f", "bestvideo[height<=360]+bestaudio/best[height<=360]", # Consider higher resolution if needed
+        "-f", "bestvideo[height<=360]+bestaudio/best[height<=360]",
+        "--quiet",
         "-o", "-", # output to stdout
         youtube_url
     ]
