@@ -1,4 +1,3 @@
 opencv-python
 ultralytics
 influxdb-client
-darknetpy
