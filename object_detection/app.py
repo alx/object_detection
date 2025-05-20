@@ -9,7 +9,7 @@ import json
 import threading
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
-from darknetpy.detector import Detector
+from ultralytics import YOLO # Replaced darknetpy
 import random
 from collections import deque
 
@@ -32,18 +32,22 @@ FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", 1280))
 FRAME_HEIGHT = int(os.environ.get("FRAME_HEIGHT", 720))
 YOUTUBE_STREAMS = os.environ.get("YOUTUBE_STREAMS", "[]")
 CLASS_WHITELIST = set(map(str.strip, os.environ.get("CLASS_WHITELIST", "").split(","))) if os.environ.get("CLASS_WHITELIST") else None
-SAVE_CROPPED_IMG = (os.getenv('SAVE_CROP_IMG', 'False') == 'True')
+SAVE_CROPPED_IMG = (os.getenv('SAVE_CROP_IMG', 'False') == 'True') # Note: Original had SAVE_CROP_IMG, docs suggest SAVE_CROPPED_IMG
 
-# Paths to YOLO model files (adjust as needed)
-DARKNET_DATA = os.environ.get("DARKNET_DATA", "/models/coco.data")
-DARKNET_CFG = os.environ.get("DARKNET_CFG", "/models/yolov4.cfg")
-DARKNET_WEIGHTS = os.environ.get("DARKNET_WEIGHTS", "/models/yolov4.weights")
-detector = Detector(DARKNET_DATA, DARKNET_CFG, DARKNET_WEIGHTS)
+# Path to YOLO model file for Ultralytics
+ULTRALYTICS_MODEL_PATH = os.environ.get("ULTRALYTICS_MODEL_PATH", "yolov8n.pt") # Default to yolov8n.pt
+try:
+    detector = YOLO(ULTRALYTICS_MODEL_PATH)
+    logger.info(f"Ultralytics YOLO model loaded from {ULTRALYTICS_MODEL_PATH}")
+except Exception as e:
+    logger.error(f"Error loading Ultralytics YOLO model: {e}")
+    sys.exit(1)
+
 
 def open_ytdlp_ffmpeg_pipe(youtube_url, width, height):
     ytdlp_cmd = [
         "yt-dlp",
-        "-f", "bestvideo[height<=360]+bestaudio/best[height<=360]",
+        "-f", "bestvideo[height<=360]+bestaudio/best[height<=360]", # Consider higher resolution if needed
         "-o", "-", # output to stdout
         youtube_url
     ]
@@ -82,11 +86,11 @@ def connect_influxdb():
             url=INFLUXDB_URL,
             token=INFLUXDB_TOKEN,
             org=INFLUXDB_ORG,
-            timeout=5000
+            timeout=5000 # milliseconds
         )
         health = client.health()
-        if health.status != "pass":
-            logger.error(f"InfluxDB health check failed: {health.message}")
+        if health.status != "pass": # type: ignore
+            logger.error(f"InfluxDB health check failed: {health.message}") # type: ignore
             return None, None
         write_api = client.write_api(write_options=SYNCHRONOUS)
         logger.info("Connected to InfluxDB.")
@@ -98,26 +102,41 @@ def connect_influxdb():
 def random_color():
     return tuple([random.randint(0, 255) for _ in range(3)])
 
-def draw_bounding_boxes(image, results):
+def draw_bounding_boxes(image, detection_results, model_names):
     """
     Draw colored bounding boxes and labels on the image.
-    results: list of dicts from darknetpy
+    detection_results: ultralytics results object (typically results[0] for single image)
+    model_names: list of class names from detector.names
     """
-    for obj in results:
-        left, top, right, bottom = obj['left'], obj['top'], obj['right'], obj['bottom']
-        label = f"{obj['class']} {obj['prob']:.2f}"
+    if detection_results is None or detection_results.boxes is None:
+        return image
+
+    for box in detection_results.boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        conf = float(box.conf[0])
+        cls_id = int(box.cls[0])
+
+        try:
+            label_name = model_names[cls_id]
+        except IndexError:
+            label_name = f"ClassID {cls_id}" # Fallback if class ID is out of bounds
+            logger.warning(f"Class ID {cls_id} out of bounds for model_names. Max ID: {len(model_names)-1}")
+
+
+        label = f"{label_name} {conf:.2f}"
         color = random_color()
-        cv2.rectangle(image, (left, top), (right, bottom), color, 2)
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
         (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-        cv2.rectangle(image, (left, top - th - baseline), (left + tw, top), color, -1)
-        cv2.putText(image, label, (left, top - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+        # Ensure text background doesn't go out of bounds
+        text_bg_y1 = max(0, y1 - th - baseline)
+        text_bg_y2 = y1
+        cv2.rectangle(image, (x1, text_bg_y1), (x1 + tw, text_bg_y2), color, -1)
+        cv2.putText(image, label, (x1, y1 - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
     return image
 
 def iou(boxA, boxB):
     """
     Intersection over Union
-    spatial proximity check based on bounding box overlap
-
     box = (x1, y1, x2, y2)
     """
     xA = max(boxA[0], boxB[0])
@@ -127,20 +146,20 @@ def iou(boxA, boxB):
     interArea = max(0, xB - xA) * max(0, yB - yA)
     boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
     boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-    iou_val = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+    iou_val = interArea / float(boxAArea + boxBArea - interArea + 1e-6) # Added epsilon for stability
     return iou_val
 
-def filter_duplicate_detections(detections, prev_detections, iou_threshold=0.5):
+def filter_duplicate_detections(detections_dicts, prev_detections_dicts, iou_threshold=0.5):
     """
-    detections: list of dicts, each with keys 'class', 'left', 'top', 'right', 'bottom'
-    prev_detections: list of dicts from previous detection cycle
-    Returns: filtered list of detections
+    detections_dicts: list of dicts, each with keys 'class', 'left', 'top', 'right', 'bottom'
+    prev_detections_dicts: list of dicts from previous detection cycle
+    Returns: filtered list of detection dicts
     """
     filtered = []
-    for det in detections:
+    for det in detections_dicts:
         boxA = (det['left'], det['top'], det['right'], det['bottom'])
         duplicate = False
-        for prev in prev_detections:
+        for prev in prev_detections_dicts:
             if det['class'] == prev['class']:
                 boxB = (prev['left'], prev['top'], prev['right'], prev['bottom'])
                 if iou(boxA, boxB) > iou_threshold:
@@ -150,77 +169,129 @@ def filter_duplicate_detections(detections, prev_detections, iou_threshold=0.5):
             filtered.append(det)
     return filtered
 
-def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream__url):
+def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug): # Corrected stream__url to stream_slug
     """
-    Crop the detected region from the frame and save it to
-    output/stream_slug/class_name/DDMMYYYY/epoch_timestamp.jpg
+    Crop the detected region from the frame and save it.
     """
+    if y1 >= y2 or x1 >= x2: # Check for invalid box dimensions
+        logger.warning(f"Skipping save_cropped_detection due to invalid box dimensions: [{x1},{y1},{x2},{y2}] for {class_name}")
+        return
     cropped = frame[y1:y2, x1:x2]
     if cropped.size == 0:
+        logger.warning(f"Skipping save_cropped_detection due to empty crop for {class_name}")
         return
     date_str = time.strftime("%d%m%Y")
-    out_dir = os.path.join("output", stream_slug, class_name, date_str)
-    os.makedirs(out_dir, exist_ok=True)
-    epoch_ts = int(time.time())
-    out_path = os.path.join(out_dir, f"{epoch_ts}.jpg")
-    cv2.imwrite(out_path, cropped)
+    # Sanitize stream_slug and class_name for directory creation if necessary
+    safe_stream_slug = "".join(c if c.isalnum() else "_" for c in stream_slug)
+    safe_class_name = "".join(c if c.isalnum() else "_" for c in class_name)
 
-def process_stream(stream, write_api):
-    url = stream['url']
-    title = stream['title']
-    slug = stream['slug']
+    out_dir = os.path.join("output", safe_stream_slug, safe_class_name)
+    os.makedirs(out_dir, exist_ok=True)
+    epoch_ts = int(time.time() * 1000) # Milliseconds for more uniqueness
+    out_path = os.path.join(out_dir, f"{epoch_ts}.jpg")
+    try:
+        cv2.imwrite(out_path, cropped)
+        logger.debug(f"Saved cropped image: {out_path}")
+    except Exception as e:
+        logger.error(f"Error saving cropped image {out_path}: {e}")
+
+
+def process_stream(stream_info, influx_write_api):
+    url = stream_info['url']
+    title = stream_info['title']
+    slug = stream_info['slug']
     logger.info(f"Opening yt-dlp+FFmpeg pipeline for '{title}' ({slug})...")
 
     ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
-    last_detection = time.time()
+    last_detection_time = time.time()
     frame_count = 0
 
-    WINDOW_SIZE = 10
-    prev_detections_window = deque(maxlen=WINDOW_SIZE)
+    WINDOW_SIZE = 10 # Number of past detection sets to consider for duplicate filtering
+    prev_detections_window_dicts = deque(maxlen=WINDOW_SIZE) # Stores lists of detection dicts
 
     while True:
         if ytdlp_proc.poll() is not None or ffmpeg_proc.poll() is not None:
             logger.warning(f"Process ended unexpectedly for '{title}' ({slug}), restarting pipeline...")
             try:
-                ytdlp_proc.terminate()
-            except Exception:
-                pass
-            try:
-                ffmpeg_proc.terminate()
-            except Exception:
-                pass
+                if ytdlp_proc and ytdlp_proc.poll() is None: ytdlp_proc.terminate() # type: ignore
+                if ffmpeg_proc and ffmpeg_proc.poll() is None: ffmpeg_proc.terminate() # type: ignore
+            except Exception as e:
+                logger.error(f"Error terminating old processes: {e}")
+            time.sleep(5) # Wait a bit before restarting
             ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
+            continue # Restart the loop
 
         frame = read_frame(ffmpeg_proc, FRAME_WIDTH, FRAME_HEIGHT)
         if frame is None:
-            logger.warning(f"Stream ended or cannot fetch frame for '{title}' ({slug}).")
-            break
+            logger.warning(f"Stream ended or cannot fetch frame for '{title}' ({slug}). Attempting restart.")
+            time.sleep(5) # Wait before trying to reopen
+            try:
+                if ytdlp_proc and ytdlp_proc.poll() is None: ytdlp_proc.terminate() # type: ignore
+                if ffmpeg_proc and ffmpeg_proc.poll() is None: ffmpeg_proc.terminate() # type: ignore
+            except Exception as e:
+                 logger.error(f"Error terminating processes before restart: {e}")
+            ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
+            continue
 
-        now = time.time()
-        if now - last_detection >= DETECTION_INTERVAL:
+        current_time = time.time()
+        if current_time - last_detection_time >= DETECTION_INTERVAL:
 
-            results = detector.detect(frame)
+            # Perform detection using Ultralytics YOLO model
+            # verbose=False can reduce console output from ultralytics
+            # conf=0.25 (default) sets confidence threshold
+            ultralytics_results = detector(frame, verbose=False)
 
-            # Filter based on classnames
-            if CLASS_WHITELIST is not None:
-                results = [obj for obj in results if obj['class'] in CLASS_WHITELIST]
+            current_detections_dicts = [] # For duplicate filtering and general processing
+            processed_for_influx = [] # To store detections that will be sent to InfluxDB
 
-            # Filter out duplicates by position/class
-            all_prev_detections = [det for frame_dets in prev_detections_window for det in frame_dets]
-            filtered_results = filter_duplicate_detections(results, all_prev_detections, iou_threshold=0.5)
+            if ultralytics_results and len(ultralytics_results) > 0:
+                # Results is a list, typically one item per image.
+                # Each item has attributes like .boxes, .masks, .keypoints
+                detection_result_item = ultralytics_results[0] # Assuming single image inference
 
-            logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))}:")
-            for obj in filtered_results:
-                cls = obj['class']
-                conf = float(obj['prob'])
-                x1, y1, x2, y2 = obj['left'], obj['top'], obj['right'], obj['bottom']
+                if detection_result_item.boxes is not None:
+                    for box in detection_result_item.boxes:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        conf = float(box.conf[0])
+                        cls_id = int(box.cls[0])
+
+                        try:
+                            class_name = detector.names[cls_id]
+                        except (IndexError, KeyError) as e:
+                            logger.warning(f"[{slug}] Class ID {cls_id} not found in model names. Error: {e}")
+                            class_name = f"UnknownClass_{cls_id}"
+
+
+                        # Filter based on CLASS_WHITELIST
+                        if CLASS_WHITELIST is not None and class_name not in CLASS_WHITELIST:
+                            continue
+
+                        # Prepare dict for duplicate filtering and general use
+                        det_dict = {
+                            'class': class_name,
+                            'prob': conf, # For consistency if draw_bounding_boxes used prob
+                            'left': x1, 'top': y1, 'right': x2, 'bottom': y2
+                        }
+                        current_detections_dicts.append(det_dict)
+                        processed_for_influx.append(det_dict)
+
+
+            # Filter out duplicates by position/class using the converted dicts
+            all_prev_detections_dicts = [det for frame_dets_list in prev_detections_window_dicts for det in frame_dets_list]
+            final_results_dicts = filter_duplicate_detections(current_detections_dicts, all_prev_detections_dicts, iou_threshold=0.4) # Adjusted threshold if needed
+
+            logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(current_time))}: {len(final_results_dicts)} objects after filtering.")
+
+            for det_dict in final_results_dicts:
+                cls = det_dict['class']
+                conf = float(det_dict['prob'])
+                x1, y1, x2, y2 = det_dict['left'], det_dict['top'], det_dict['right'], det_dict['bottom']
                 logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{x1}, {y1}, {x2}, {y2}]")
 
-                # Save cropped detection
                 if SAVE_CROPPED_IMG:
                     save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
 
-                if write_api:
+                if influx_write_api:
                     pt = (
                         Point("object_detections")
                         .tag("object", cls)
@@ -228,53 +299,72 @@ def process_stream(stream, write_api):
                         .tag("stream_title", title)
                         .tag("stream_url", url)
                         .field("confidence", conf)
-                        .field("x1", x1)
-                        .field("y1", y1)
-                        .field("x2", x2)
-                        .field("y2", y2)
-                        .time(int(now * 1e9), WritePrecision.NS)
+                        .field("x1", float(x1)) # InfluxDB fields
+                        .field("y1", float(y1))
+                        .field("x2", float(x2))
+                        .field("y2", float(y2))
+                        .time(int(current_time * 1e9), WritePrecision.NS) # Nanosecond precision timestamp
                     )
                     try:
-                        write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=pt)
+                        influx_write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=pt)
                     except Exception as e:
                         logger.warning(f" [{slug}] Could not write to InfluxDB: {e}")
                 else:
                     logger.warning(f" [{slug}] InfluxDB write_api not available, skipping DB write.")
 
-            # Draw colored bounding boxes and save the image if debug mode
-            if filtered_results and DEBUG_IMG_BBOX:
-                annotated_frame = draw_bounding_boxes(frame.copy(), results)
+            # Draw colored bounding boxes using original ultralytics_results[0] for direct access to its structure
+            if final_results_dicts and DEBUG_IMG_BBOX and ultralytics_results and len(ultralytics_results) > 0:
+                # Pass the specific result item that contains .boxes
+                annotated_frame = draw_bounding_boxes(frame.copy(), ultralytics_results[0], detector.names)
                 os.makedirs("output_images", exist_ok=True)
-                epoch_ts = int(now)
+                epoch_ts = int(current_time)
                 out_path = os.path.join("output_images", f"{slug}_frame_{frame_count:06d}_{epoch_ts}.jpg")
                 cv2.imwrite(out_path, annotated_frame)
 
-            last_detection = now
-            frame_count += 1
-            prev_detections_window.append(results)
+            last_detection_time = current_time
+            prev_detections_window_dicts.append(current_detections_dicts) # Store the dicts used for filtering
 
-    ffmpeg_proc.terminate()
-    ytdlp_proc.terminate()
+        frame_count += 1
+        # Small sleep to prevent tight loop if DETECTION_INTERVAL is large or if frame processing is very fast
+        # This also yields control, which can be good in threaded environments.
+        if DETECTION_INTERVAL > 0.1 : time.sleep(0.01)
+
+
+    logger.info(f"Exiting process_stream for '{title}' ({slug}).")
+    if ffmpeg_proc and ffmpeg_proc.poll() is None: ffmpeg_proc.terminate() # type: ignore
+    if ytdlp_proc and ytdlp_proc.poll() is None: ytdlp_proc.terminate() # type: ignore
 
 def main():
     try:
-        streams = json.loads(YOUTUBE_STREAMS)
-    except Exception as e:
-        logger.error(f"Could not parse YOUTUBE_STREAMS: {e}")
+        streams_data = json.loads(YOUTUBE_STREAMS)
+    except json.JSONDecodeError as e:
+        logger.error(f"Could not parse YOUTUBE_STREAMS JSON: {e}. Value was: {YOUTUBE_STREAMS}")
         sys.exit(1)
-    if not streams:
-        logger.error("No streams specified in YOUTUBE_STREAMS.")
+    except Exception as e: # Catch any other unexpected error during parsing
+        logger.error(f"An unexpected error occurred while parsing YOUTUBE_STREAMS: {e}")
         sys.exit(1)
-    client, write_api = connect_influxdb()
+
+    if not streams_data:
+        logger.error("No streams specified in YOUTUBE_STREAMS. Please provide a valid JSON list of streams.")
+        sys.exit(1)
+
+    influx_client, influx_write_api = connect_influxdb()
+
     threads = []
-    for stream in streams:
-        t = threading.Thread(target=process_stream, args=(stream, write_api))
-        t.start()
-        threads.append(t)
+    for stream_config in streams_data:
+        if not all(k in stream_config for k in ("url", "title", "slug")):
+            logger.warning(f"Skipping stream due to missing 'url', 'title', or 'slug': {stream_config}")
+            continue
+        thread = threading.Thread(target=process_stream, args=(stream_config, influx_write_api), daemon=True)
+        thread.start()
+        threads.append(thread)
+
     for t in threads:
-        t.join()
-    if client:
-        client.close()
+        t.join() # Wait for all stream processing threads to complete (they run indefinitely until error/stream ends)
+
+    if influx_client:
+        influx_client.close()
+    logger.info("All stream processing finished. Exiting main application.")
 
 if __name__ == "__main__":
     main()
