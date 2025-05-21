@@ -183,7 +183,7 @@ def save_fullframe_detection(frame, class_name, stream_slug):
     epoch_ts = int(time.time() * 1000) # Milliseconds for more uniqueness
     out_path = os.path.join(out_dir, f"{epoch_ts}.jpg")
     try:
-        cv2.imwrite(out_path)
+        cv2.imwrite(out_path, frame)
         logger.info(f"Saved fullframe image: {out_path}")
     except Exception as e:
         logger.error(f"Error saving cropped image {out_path}: {e}")
