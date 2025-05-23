@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
     git \
-    wget \
     libopencv-dev \
     # Add any other specific dependencies for hank-ai/darknet if needed (e.g., libomp-dev for OpenMP)
     && rm -rf /var/lib/apt/lists/*
@@ -28,8 +27,18 @@ RUN sed -i 's/GPU=1/GPU=0/' Makefile \
     && sed -i 's/OPENCV=0/OPENCV=1/' Makefile \
     && sed -i 's/LIBSO=0/LIBSO=1/' Makefile \
     && sed -i 's/OPENMP=0/OPENMP=1/' Makefile # Optional: Enable OpenMP for CPU acceleration
-# Compile Darknet
-RUN make -j$(nproc)
+
+# Compile Darknet and echo to invalidate cache if needed
+RUN make -j$(nproc) && echo "Darknet compilation finished."
+
+# Verify that libdarknet.so and darknet.py exist before trying to copy
+RUN echo "--- Listing /opt/darknet contents after make ---" \
+    && ls -lh /opt/darknet \
+    && echo "--- Checking for libdarknet.so ---" \
+    && ls -lh /opt/darknet/libdarknet.so \
+    && echo "--- Checking for python/darknet.py ---" \
+    && ls -lh /opt/darknet/python/darknet.py \
+    && echo "--- End of verification ---"
 
 # Copy the compiled shared library and Python wrapper to the app directory
 WORKDIR /app
@@ -46,7 +55,7 @@ COPY object_detection/requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install yt-dlp and ffmpeg (if not already in base image or provided differently)
+# Install yt-dlp and ffmpeg
 RUN pip install --no-cache-dir yt-dlp
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
@@ -54,9 +63,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 COPY object_detection/app.py .
 
 # Make sure the output directories will be writable by the app
-# The user running the app inside the container might not have write access by default.
-# One way is to create them and chmod them.
-# Alternatively, manage volumes and permissions from docker-compose.
 RUN mkdir -p output/fullframe output/cropped output_images \
     && chmod -R 777 output output_images
 
