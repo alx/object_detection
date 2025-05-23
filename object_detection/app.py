@@ -188,7 +188,6 @@ def save_fullframe_detection(frame, class_name, stream_slug):
     except Exception as e:
         logger.error(f"Error saving cropped image {out_path}: {e}")
 
-
 def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug):
     """
     Crop the detected region from the frame and save it.
@@ -214,6 +213,28 @@ def save_cropped_detection(frame, x1, y1, x2, y2, class_name, stream_slug):
     except Exception as e:
         logger.error(f"Error saving cropped image {out_path}: {e}")
 
+def save_empty_detection_frame(frame, stream_slug, current_timestamp, last_saved_timestamp):
+    """
+    Saves the full frame to 'output/fullframe/empty_images/{stream_slug}/'
+    if no objects are detected and at least an hour has passed since the last save.
+    Returns the updated last_saved_timestamp.
+    """
+    time_since_last_save = current_timestamp - last_saved_timestamp
+    if time_since_last_save >= 3600: # 3600 seconds = 1 hour
+        safe_stream_slug = "".join(c if c.isalnum() else "_" for c in stream_slug)
+        out_dir = os.path.join("output", "fullframe", "empty_images", safe_stream_slug)
+        os.makedirs(out_dir, exist_ok=True)
+        epoch_ts_ms = int(current_timestamp * 1000) # Milliseconds for uniqueness
+        out_path = os.path.join(out_dir, f"{epoch_ts_ms}.jpg")
+        try:
+            cv2.imwrite(out_path, frame)
+            logger.info(f"[{stream_slug}] Saved empty detection frame: {out_path}")
+            return current_timestamp # Update the last saved timestamp
+        except Exception as e:
+            logger.error(f"[{stream_slug}] Error saving empty detection frame {out_path}: {e}")
+            return last_saved_timestamp # Don't update if save failed
+    return last_saved_timestamp # No save needed, return original timestamp
+
 
 def process_stream(stream_info, influx_write_api):
     url = stream_info['url']
@@ -224,6 +245,7 @@ def process_stream(stream_info, influx_write_api):
     ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
     last_detection_time = time.time()
     frame_count = 0
+    last_empty_saved_time = 0.0 # Timestamp of the last saved empty frame for this stream
 
     WINDOW_SIZE = 10 # Number of past detection sets to consider for duplicate filtering
     prev_detections_window_dicts = deque(maxlen=WINDOW_SIZE) # Stores lists of detection dicts
@@ -238,6 +260,7 @@ def process_stream(stream_info, influx_write_api):
                 logger.error(f"Error terminating old processes: {e}")
             time.sleep(5) # Wait a bit before restarting
             ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
+            last_empty_saved_time = 0.0 # Reset timer on restart
             continue # Restart the loop
 
         frame = read_frame(ffmpeg_proc, FRAME_WIDTH, FRAME_HEIGHT)
@@ -250,91 +273,81 @@ def process_stream(stream_info, influx_write_api):
             except Exception as e:
                  logger.error(f"Error terminating processes before restart: {e}")
             ytdlp_proc, ffmpeg_proc = open_ytdlp_ffmpeg_pipe(url, FRAME_WIDTH, FRAME_HEIGHT)
+            last_empty_saved_time = 0.0 # Reset timer on restart
             continue
 
         current_time = time.time()
         if current_time - last_detection_time >= DETECTION_INTERVAL:
 
-            # Perform detection using Ultralytics YOLO model
-            # verbose=False can reduce console output from ultralytics
-            # conf=0.25 (default) sets confidence threshold
             ultralytics_results = detector(frame, verbose=False)
-
-            current_detections_dicts = [] # For duplicate filtering and general processing
-            processed_for_influx = [] # To store detections that will be sent to InfluxDB
+            current_detections_dicts = []
+            processed_for_influx = []
 
             if ultralytics_results and len(ultralytics_results) > 0:
-                # Results is a list, typically one item per image.
-                # Each item has attributes like .boxes, .masks, .keypoints
-                detection_result_item = ultralytics_results[0] # Assuming single image inference
-
+                detection_result_item = ultralytics_results[0]
                 if detection_result_item.boxes is not None:
                     for box in detection_result_item.boxes:
                         x1, y1, x2, y2 = map(int, box.xyxy[0])
                         conf = float(box.conf[0])
                         cls_id = int(box.cls[0])
-
                         try:
                             class_name = detector.names[cls_id]
                         except (IndexError, KeyError) as e:
                             logger.warning(f"[{slug}] Class ID {cls_id} not found in model names. Error: {e}")
                             class_name = f"UnknownClass_{cls_id}"
 
-
-                        # Filter based on CLASS_WHITELIST
                         if CLASS_WHITELIST is not None and class_name not in CLASS_WHITELIST:
                             continue
-
-                        # Prepare dict for duplicate filtering and general use
                         det_dict = {
                             'class': class_name,
-                            'prob': conf, # For consistency if draw_bounding_boxes used prob
+                            'prob': conf,
                             'left': x1, 'top': y1, 'right': x2, 'bottom': y2
                         }
                         current_detections_dicts.append(det_dict)
                         processed_for_influx.append(det_dict)
 
-
-            # Filter out duplicates by position/class using the converted dicts
             all_prev_detections_dicts = [det for frame_dets_list in prev_detections_window_dicts for det in frame_dets_list]
-            final_results_dicts = filter_duplicate_detections(current_detections_dicts, all_prev_detections_dicts, iou_threshold=0.4) # Adjusted threshold if needed
+            final_results_dicts = filter_duplicate_detections(current_detections_dicts, all_prev_detections_dicts, iou_threshold=0.4)
 
             if len(final_results_dicts) > 0:
                 logger.info(f"[{slug}][Frame {frame_count}] Prediction results at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(current_time))}: {len(final_results_dicts)} objects after filtering.")
+                for det_dict in final_results_dicts:
+                    cls = det_dict['class']
+                    conf = float(det_dict['prob'])
+                    x1, y1, x2, y2 = det_dict['left'], det_dict['top'], det_dict['right'], det_dict['bottom']
+                    logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{x1}, {y1}, {x2}, {y2}]")
 
-            for det_dict in final_results_dicts:
-                cls = det_dict['class']
-                conf = float(det_dict['prob'])
-                x1, y1, x2, y2 = det_dict['left'], det_dict['top'], det_dict['right'], det_dict['bottom']
-                logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{x1}, {y1}, {x2}, {y2}]")
+                    save_fullframe_detection(frame, cls, slug)
+                    if SAVE_CROPPED_IMG: # Check environment variable before saving cropped image
+                        save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
 
-                save_fullframe_detection(frame, cls, slug)
-                save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
+                    if influx_write_api:
+                        pt = (
+                            Point("object_detections")
+                            .tag("object", cls)
+                            .tag("stream_slug", slug)
+                            .tag("stream_title", title)
+                            .tag("stream_url", url)
+                            .field("confidence", conf)
+                            .field("x1", int(x1))
+                            .field("y1", int(y1))
+                            .field("x2", int(x2))
+                            .field("y2", int(y2))
+                            .time(int(current_time * 1e9), WritePrecision.NS)
+                        )
+                        try:
+                            influx_write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=pt)
+                        except Exception as e:
+                            logger.warning(f" [{slug}] Could not write to InfluxDB: {e}")
+                    else:
+                        logger.warning(f" [{slug}] InfluxDB write_api not available, skipping DB write.")
+            else: # No detections found in final_results_dicts
+                logger.info(f"[{slug}][Frame {frame_count}] No objects detected at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(current_time))}.")
+                # Save full frame if no detections and an hour has passed
+                last_empty_saved_time = save_empty_detection_frame(frame, slug, current_time, last_empty_saved_time)
 
-                if influx_write_api:
-                    pt = (
-                        Point("object_detections")
-                        .tag("object", cls)
-                        .tag("stream_slug", slug)
-                        .tag("stream_title", title)
-                        .tag("stream_url", url)
-                        .field("confidence", conf)
-                        .field("x1", int(x1)) # InfluxDB fields
-                        .field("y1", int(y1))
-                        .field("x2", int(x2))
-                        .field("y2", int(y2))
-                        .time(int(current_time * 1e9), WritePrecision.NS) # Nanosecond precision timestamp
-                    )
-                    try:
-                        influx_write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=pt)
-                    except Exception as e:
-                        logger.warning(f" [{slug}] Could not write to InfluxDB: {e}")
-                else:
-                    logger.warning(f" [{slug}] InfluxDB write_api not available, skipping DB write.")
 
-            # Draw colored bounding boxes using original ultralytics_results[0] for direct access to its structure
             if final_results_dicts and DEBUG_IMG_BBOX and ultralytics_results and len(ultralytics_results) > 0:
-                # Pass the specific result item that contains .boxes
                 annotated_frame = draw_bounding_boxes(frame.copy(), ultralytics_results[0], detector.names)
                 os.makedirs("output_images", exist_ok=True)
                 epoch_ts = int(current_time)
@@ -342,13 +355,10 @@ def process_stream(stream_info, influx_write_api):
                 cv2.imwrite(out_path, annotated_frame)
 
             last_detection_time = current_time
-            prev_detections_window_dicts.append(current_detections_dicts) # Store the dicts used for filtering
+            prev_detections_window_dicts.append(current_detections_dicts)
 
         frame_count += 1
-        # Small sleep to prevent tight loop if DETECTION_INTERVAL is large or if frame processing is very fast
-        # This also yields control, which can be good in threaded environments.
         if DETECTION_INTERVAL > 0.1 : time.sleep(0.01)
-
 
     logger.info(f"Exiting process_stream for '{title}' ({slug}).")
     if ffmpeg_proc and ffmpeg_proc.poll() is None: ffmpeg_proc.terminate() # type: ignore
@@ -360,7 +370,7 @@ def main():
     except json.JSONDecodeError as e:
         logger.error(f"Could not parse YOUTUBE_STREAMS JSON: {e}. Value was: {YOUTUBE_STREAMS}")
         sys.exit(1)
-    except Exception as e: # Catch any other unexpected error during parsing
+    except Exception as e:
         logger.error(f"An unexpected error occurred while parsing YOUTUBE_STREAMS: {e}")
         sys.exit(1)
 
@@ -380,7 +390,7 @@ def main():
         threads.append(thread)
 
     for t in threads:
-        t.join() # Wait for all stream processing threads to complete (they run indefinitely until error/stream ends)
+        t.join()
 
     if influx_client:
         influx_client.close()
