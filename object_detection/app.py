@@ -318,8 +318,8 @@ def process_stream(stream_info, influx_write_api):
                     logger.info(f" [{slug}] Detected: {cls} (confidence: {conf:.2f}) at [{x1}, {y1}, {x2}, {y2}]")
 
                     save_fullframe_detection(frame, cls, slug)
-                    if SAVE_CROPPED_IMG: # Check environment variable before saving cropped image
-                        save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
+                    # if SAVE_CROPPED_IMG: # Check environment variable before saving cropped image
+                    #     save_cropped_detection(frame, x1, y1, x2, y2, cls, slug)
 
                     if influx_write_api:
                         pt = (
